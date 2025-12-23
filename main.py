@@ -1,11 +1,12 @@
 import discord
-import math
-from discord import app_commands
+import zlib
 from discord.ext import commands
 import os 
 import json
 from dotenv import load_dotenv
 import random
+from enum import Enum
+
 # --- Configuration & Setup ---
 load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
@@ -18,8 +19,14 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+rarityClass = {0.0027:"Legendary", 0.042:"Rare", 0.272:"Uncommon" , 1:"Common" }
 
-dbChannels = ["card-json", "card-embed","user-json","user-embed", "inventory-json","inventory-embed", "array-json"]
+def calcRarity(rarity):
+    for percent in rarityClass:
+        if rarity<=percent:
+            return rarityClass[percent]
+
+dbChannels = ["card-json", "user-json", "inventory-json","gallery-embed"]
 
 #User data model: 
 #inventory hash 
@@ -34,23 +41,32 @@ dbChannels = ["card-json", "card-embed","user-json","user-embed", "inventory-jso
 #        self.cardImg = cardImg
 #        self.rarity = rarity
 
-class dbType(Enum):
+class dbType(Enum): #dicates the target channel to search through
     CARD_JSON = 1
-    ARRAY_JSON = 2 #stores an array of card hashes per inventory 
-    USER_JSON = 3 
-    INVENTORY_JSON = 4
+    USER_JSON = 2 
+    INVENTORY_JSON = 3
+
+dbTypeDict = {dbType.CARD_JSON:"card-json",
+              dbType.USER_JSON:"user-json",
+              dbType.INVENTORY_JSON:"inventory-json"}
+
 
 #JSONs are needed to store information that's not necessarily displayed by embeds 
 #It's a way to easily read messages into dicts. 
-#I'm creating objects with some set of members variables so that each JSON can easily map to that 
+#I'm creating objects with some set of member variables so that each JSON can easily map to that 
 #I currently don't think these classes are entirely necessary though. I'm mostly using them as frameworks for 
 # the data each object type requires 
 
-async def convertToJSON(ctx, embed, type):
-    if dbType(type) == 1: #CARD_JSON
-        for key in embed.to_dict(): 
-            temp = embed.to_dict()[key]
-            print(f"{temp}")
+async def toJSON(ctx, data, type): #converts embed to JSON
+    #data = a dict of json fields
+    print(f"(convertJSON) passed type: {type}")
+    targetDb = dbTypeDict[type]
+    #updates json channel with corresponding json info
+    targetChannel = discord.utils.get(ctx.guild.text_channels,name=targetDb)
+    await targetChannel.send(json.dumps(data))
+    await ctx.send(f"successfully updated {targetDb}")
+    return
+ 
 
 
 def checkRole(roleA, roleList):
@@ -94,7 +110,7 @@ async def initDatabase(guild):
             modCategory = await guild.create_category(name="bot-data", overwrites=overwrites)
         
         for channelName in missingChannels: 
-            await guild.create_text_channel(name=channelName, category=modCategory)             
+            await guild.create_text_channel(name=channelName, category=modCategory)           
 
 @bot.event
 async def on_ready():
@@ -104,7 +120,6 @@ async def on_ready():
 
 @bot.command()
 async def daily(ctx, coin):
-    prob = {"Legendary": 0.0027, "Rare": 0.042, "Uncommon": 0.272, "Common": 0.682} 
     # Placeholder for daily logic
     await ctx.send(f"Daily rewards for {coin} coins requested.")
 
@@ -137,23 +152,101 @@ async def cleardb(ctx):
     await initDatabase(guild)
     await ctx.send("Database cleared and re-initialized.")
 
+def createHash(dbObject):
+    #return hashlib.sha1(json.dumps(dbObject).encode()).hexdigest()
+    return format(zlib.crc32(json.dumps(dbObject).encode()) & 0xFFFFFFFF, '08x')
+
 #CARD-STORING LOGIC==== 
 @bot.command() 
+@commands.is_owner()
 async def createcard(ctx, title, img):
-    rarity = round(random.random(),5)
-    print(f"generated random: {rarity}")
-    cardEmbed = discord.Embed(title=title, description=f"Created by: {ctx.author.name}\nRarity: {round(rarity*100,5)}%")
+    prob = round(random.random(),5)
+    rarity = calcRarity(prob)
+    print(f"generated random: {prob}")
+    print(f"generated rarity: {rarity}")
+    #card = Card(title, ctx.author.name, img, rarity)
+    dataList = {"Title":title,
+                "Creator":ctx.author.name,
+                "Owner":None,
+                "Content":img,
+                "Probability":prob,
+                "Rarity":rarity
+                }
+    cardID = createHash(dataList)
+    dataList["CardID"]=cardID
+
+    cardEmbed = discord.Embed(title=title, description=f"\nCard ID: {cardID}\nCreated by: {ctx.author.name}\nRarity: {rarity}")
     cardEmbed.set_image(url=img)
-    card = Card(title, ctx.author.name, img, rarity)
-    await convertToJSON(ctx, cardEmbed, CARD)
+
+    print(f"generated hash: {dataList["CardID"]}")
+    await toJSON(ctx, dataList, dbType.CARD_JSON)
     await ctx.send(embed=cardEmbed)
-    await storecard(ctx, card)
+    return
+    #await storecard(ctx)
 
+@bot.command()
+async def searchcard(ctx, cardID):
+    await search(ctx,dbType.CARD_JSON,cardID)
+    return
 
-async def renderEmbed(ctx): 
+# TODO:  
+# add user/inventory updating logic that accounts for trading and daily claims 
+# possible updates: 
+# deletion, and creation 
+# NOTE: 
+# I might need to re-introduce pre-rendered galleries for inventories 
+
+@bot.command()
+async def givecard(ctx, cardID):
+    search(ctx,dbType.CARD_JSON,cardID)
+    return
+
+@bot.command()
+@commands.is_owner()
+async def givecard(ctx, username, cardID):
+    cardFound = await search(ctx,dbType.CARD_JSON,cardID)
+    userFound = await search(ctx,dbType.USER_JSON,username)
+    if  cardFound is None:  
+        ctx.send("Card doesn't exist")
+    elif userFound is None: 
+        userFound = await createUser(ctx,username)
+    
     return 
 
-async def renderGallery(): 
+async def createUser(ctx, username):
+    userJson = {
+        "Username":username,
+        "Balance":0.0
+    }
+    InventoryID = createHash(userJson)
+    userJson["InventoryID"]=InventoryID
+    userChannel = discord.utils.get(ctx.guild.text_channels, name="user-json")
+    userEmbed = renderEmbed(ctx, dbType.USER_JSON, userJson)
+
+async def search(ctx, type, ID): #returns a discord.message or None    
+    targetDb = dbTypeDict[type]
+    targetChannel = discord.utils.get(ctx.guild.text_channels,name=targetDb) 
+    async for message in targetChannel.history(limit=None):
+        if ID in message.content: 
+            await renderEmbed(ctx,type,message.content)
+            return message
+    await ctx.send("Card not found")
+    return None
+
+async def renderEmbed(ctx,type,jsonData): #TODO: renderEmbed needs to account for inventories and users 
+    if type.value == 1:
+        strData = json.loads(jsonData)
+        cardEmbed = discord.Embed(title=strData["Title"], description=f"\nCard ID: {strData["CardID"]}\nCreated by: {strData["Creator"]}\nRarity: {strData["Rarity"]}")
+        cardEmbed.set_image(url=strData["Content"])
+        await ctx.send(embed=cardEmbed)
+        return cardEmbed
+    if type.value == 2:  #NOTE: only gallery embeds are accessed for json information, everything else is stored as a json
+        strData = json.loads(jsonData)
+        cardEmbed = discord.Embed(title=strData["Username"], description=f"\nInventory ID: {strData["InventoryID"]}\nBalance: {strData["Balance"]}")
+        await ctx.send(embed=cardEmbed)
+        return cardEmbed
+    
+async def renderGallery(ctx,jsonData): #redundant bruhaps (consolidated via renderEmbed)
     return 
 
 async def renderInventory():
@@ -167,7 +260,7 @@ async def renderInventory():
       #  )
     return 
 
-async def storecard(ctx, card):
+async def storecard(ctx, cardID):
     return
 
 #+++++==== 
