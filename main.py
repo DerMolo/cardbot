@@ -1,5 +1,5 @@
 import discord
-from discord.ui import Select, View, Button
+#from discord.ui import Select, View, Button
 from discord.ext import commands
 import os 
 import json
@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import random
 from enum import Enum
 import math
+from functools import partial
 
 # --- Configuration & Setup ---
 load_dotenv()
@@ -182,10 +183,12 @@ async def removedb(ctx):
 async def cleardb(ctx): 
     guild = ctx.guild
     modCategory = discord.utils.get(guild.categories, name="bot-data")
-    if modCategory: await modCategory.delete()
+    if modCategory: 
+        await modCategory.delete()
     for name in dbChannels:
         ch = discord.utils.get(guild.text_channels, name=name)
-        if ch: await ch.delete()
+        if ch: 
+            await ch.delete()
 
     await initDatabase(guild)
     await ctx.send("Database cleared and re-initialized.")
@@ -250,20 +253,43 @@ async def search(ctx, type, ID): #returns a discord.message or None
         try:  
             message = await targetChannel.fetch_message(ID)
         except discord.NotFound: 
-            await ctx.send(f"Entry in {targetDb} not found")
+            await ctx.send(f"(search) Entry in {targetDb} not found")
             return None
-        await ctx.send(f"Entry in {targetDb} found")
+        await ctx.send(f"(search) Entry in {targetDb} found")
         await sendEmbedFromJson(ctx,type,message.content)
         return message
     else: #CURRENT WORKAROUND FOR USING USERNAMES INSTEAD OF USERID 
         #TODO: FIND A WAY TO MAP USERNAMES TO USERIDS 
         async for message in targetChannel.history(limit=None): #LINEAR SEARCH APPROACH 
             if ID in message.content:
-                ctx.send(f"Entry in {targetDb} found") 
+                ctx.send(f"(linear search) Entry in {targetDb} found") 
                 await sendEmbedFromJson(ctx,type,message.content)
                 return message
-        await ctx.send(f"Entry in {targetDb} not found")
+        await ctx.send(f"(linear search) Entry in {targetDb} not found")
         return None
+
+async def silentSearch(ctx, type, ID): 
+    targetDb = dbTypeDict[type]
+    targetChannel = discord.utils.get(ctx.guild.text_channels,name=targetDb)
+    if not type == dbType.USER_JSON:
+        try:  
+            message = await targetChannel.fetch_message(ID)
+        except discord.NotFound: 
+            print(f"(search) Entry in {targetDb} not found")
+            return None
+        print(f"(search) Entry in {targetDb} found")
+        #await sendEmbedFromJson(ctx,type,message.content)
+        return message
+    else: #CURRENT WORKAROUND FOR USING USERNAMES INSTEAD OF USERID 
+        #TODO: FIND A WAY TO MAP USERNAMES TO USERIDS 
+        async for message in targetChannel.history(limit=None): #LINEAR SEARCH APPROACH 
+            if ID in message.content:
+                print(f"(linear search) Entry in {targetDb} found") 
+                #await sendEmbedFromJson(ctx,type,message.content)
+                return message
+        print(f"(linear search) Entry in {targetDb} not found")
+        return None    
+
 
 # TODO:  
 # add user/inventory updating logic that accounts for trading and daily claims 
@@ -275,8 +301,8 @@ async def search(ctx, type, ID): #returns a discord.message or None
 @bot.command()
 @commands.is_owner() 
 async def givecard(ctx, username, cardID):
-    cardFound = await search(ctx,dbType.CARD_JSON,cardID)
-    userFound = await search(ctx,dbType.USER_JSON,username)
+    cardFound = await silentSearch(ctx,dbType.CARD_JSON,cardID)
+    userFound = await silentSearch(ctx,dbType.USER_JSON,username)
     if cardFound is None:
         await ctx.send("Card doesn't exist")  
         return
@@ -287,29 +313,55 @@ async def givecard(ctx, username, cardID):
     else: 
         userFound = json.loads(userFound.content)
         cardFound = json.loads(cardFound.content)
-        inventoryFound = search(ctx,dbType.INVENTORY_JSON,userFound["InventoryID"])
+        inventoryFound = await silentSearch(ctx,dbType.INVENTORY_JSON,userFound["InventoryID"])
         invJson = json.loads(inventoryFound.content)
         invJson["CardIDs"].append(cardFound["CardID"])
         invJson["CardCount"] += 1 
-        inventoryFound.edit(content=json.dumps(invJson))
-    return    
+        await inventoryFound.edit(content=json.dumps(invJson))
+    dChanges = {
+        "Owner" : username
+    }
+    await updateEntry(ctx,cardID,dbType.CARD_JSON,dChanges)
 
-#CURRENTLY UNUSED 
-async def updateUserBalance(ctx,userID,balance):
-    userJson = await search(ctx, dbType.USER_JSON, userID)
-    if userJson is None:
-        print("updateUserBalance: No user found") 
+#UPDATE FUNCTIONS 
+#async def updateUserBalance(ctx,userID,balance):
+#    userJson = await search(ctx, dbType.USER_JSON, userID)
+#    if userJson is None:
+#        print("updateUserBalance: No user found") 
+#        return 
+#    userDict = json.loads(userJson.content)
+#    userDict["Balance"] = balance
+#    await userJson.edit(content=json.dumps(userDict))
+
+#async def updateCard(ctx,cardID,username):
+#    cardJson = await search(ctx, dbType.CARD_JSON, cardID)
+#    if cardJson is None:
+#        print("updateCard: No card found") 
+#        return 
+#    userDict = json.loads(cardJson.content)
+#    userDict["Owner"] = username
+ #   await cardJson.edit(content=json.dumps(userDict))
+
+#Generalizing entry changes 
+#NOTE: Only applicable to USERS and CARDS
+async def updateEntry(ctx,ID,type,dictChanges):
+    jsonEntry = await search(ctx, type, ID)
+    if jsonEntry is None: 
+        print("updateEntry: Target item not found")
         return 
-    userDict = json.loads(userJson.content)
-    userDict["Balance"] = balance
-    await userJson.edit(content=json.dumps(userDict))
-    return 
+    entryDict = json.loads(jsonEntry.content)
+    for field, change in dictChanges.items(): 
+        entryDict[field]=change
+        await ctx.send(f"Successfully updated {field} with {change}")
+    await jsonEntry.edit(content=json.dumps(entryDict))
+        
+#TODO: Update givecard to prevent duplicate cards from being given 
 
 async def updateInventory(ctx,invID,cardID):
     
     return 
 
-
+#ENTRY CREATION 
 async def createUser(ctx, username, cardJson):
     card = json.loads(cardJson)
     userDict = {
@@ -319,7 +371,7 @@ async def createUser(ctx, username, cardJson):
     }
     userDict["InventoryID"] = await createInventory(ctx, username,userDict["UserID"], card)
     await storeJSON(ctx, userDict, userDict["UserID"],dbType.USER_JSON) #update user-json
-    await sendEmbedFromJson(ctx, dbType.USER_JSON, userDict)
+    await sendEmbedFromJson(ctx, dbType.USER_JSON, str(userDict))
     return userDict["UserID"] 
     
 
@@ -348,105 +400,129 @@ async def createInventory(ctx, username, userID, cardDict):
 # interaction failure issues          
 
 class inventoryView(discord.ui.View):
-    async def __init__(self,ctx,invDict):
-        super().__init__()
-        self.embedList = [] #embeds displayed when selected 
-        tempCardImages = [] #attachments for media gallery
-        self.pageList = [] #consolidating every 10 card images into a page within pageList 
-        self.cardDicts = [] 
-        index = 0
-        for cardID in invDict["CardIDs"]: #assembling list of embeds 
-            tempCardDict = json.loads(await search(ctx,dbType.CARD_JSON,cardID).content,cardID)
-            self.cardDicts.append(tempCardDict)
-            cardEmbed = discord.Embed(title=tempCardDict["Title"], description=f"\nCard ID: {tempCardDict["CardID"]}\nCreated by: {tempCardDict["Creator"]}\nRarity: {tempCardDict["Rarity"]}")
-            cardEmbed.set_image(url=tempCardDict["Content"])
-            
-            self.embedList.append(cardEmbed)
-            tempCardImages.append(tempCardDict["Content"])
-            if index+1 % 10 == 0 or index == len(invDict["CardIDs"])-1: 
-                self.pageList.append(tempCardImages)
-                tempCardImages.clear()
-            index += 1 
+    def __init__(self,embedList, optionList):
+        super().__init__(timeout=180)
+        self.embedList = embedList #embeds displayed when selected 
+        self.optionList = optionList #consolidating every 25 card options into a page within pageList 
+        #self.cardDicts = cardDicts 
+
         self.pageIndex = 0
-        #Adding gallery items to view
-        #if len(self.pageList) > 1: #"pagination" for inventory sizes greater than 10
-        #    nextPageButton = discord.ui.Button(label=f"Next Page", custom_id=f"{self.pageIndex}")
-        #    nextPageButton.callback = self.nextPageCallback
-        #    self.add_item(nextPageButton)
-        #self.add_item(discord.ui.MediaGallery(items=self.pageList[0]))
-        self.assemblePage(self,self.pageIndex)
-        #index = 0
-        #for dict in self.cardDicts: 
-        #    galleryButton = discord.ui.Button(label=f"Inspect {dict["Title"]}", custom_id=f"{index}")
-        #    galleryButton.callback=self.gallerySelectionCallback
-        #    self.add_item(galleryButton)
-        #    index += 1
-        self.maxPageSize = math.ceil(len(tempCardImages)/10)
+        self.assemblePage(self.pageIndex)
+        self.maxPageSize = math.ceil(len(embedList)/25)
 
     def assemblePage(self,pIndex):
-        if len(self.pageList) > 1: #adding next page button for pagelists greater than one 
-            nextPageButton = discord.ui.Button(label=f"Next Page", custom_id=f"{pIndex}")
-            nextPageButton.callback = self.nextPageCallback(True)
+        self.clear_items() 
+        if len(self.optionList) > 1: #adding next page button for pagelists greater than one 
+            nextButton = discord.ui.Button(label="Next Page", custom_id=f"{pIndex}")
+            nextButton.callback = partial(self.nextPageCallback, forward = True)
             if pIndex > 0: 
-                prevPageButton = discord.ui.Button(label=f"Prev Page", custom_id=f"{pIndex}")
-                prevPageButton.callback = self.nextPageCallback(False)
-                self.add_item(prevPageButton)
-            self.add_item(nextPageButton)
-        self.add_item(discord.ui.MediaGallery(items=self.pageList[pIndex]))
+                prevButton = discord.ui.Button(label="Prev Page", custom_id=f"{pIndex}")
+                prevButton.callback = partial(self.nextPageCallback, forward = False)
+                self.add_item(prevButton)
+            self.add_item(nextButton)
 
-        pageMaxRange = len(self.pageList[pIndex]) #set of cards within the given page 
+        #currentMedia = self.pageList[pIndex]
+        #self.add_item(discord.ui.MediaGallery(*currentMedia))
+
+        #pageMaxRange = len(self.optionList[pIndex]) #set of cards within the given page 
         #necessary for properly button.IDs to their corresponding embed 
-        
-        for index in range(pageMaxRange): # pageIndex * 10 + offset 
-            cardIndex = pIndex*10+index
-            dict = self.cardDicts[cardIndex]
-            galleryButton = discord.ui.Button(label=f"Inspect {dict["Title"]}", custom_id=f"{cardIndex}")
-            galleryButton.callback=self.gallerySelectionCallback
-            self.add_item(galleryButton)
+
+        self.selectMenu = discord.ui.Select(
+            placeholder="Choose a card",
+            options = self.optionList[pIndex]
+        )
+        self.selectMenu.callback = self.selectCard 
+        self.add_item(self.selectMenu)
+        #for index in range(pageMaxRange): # pageIndex * 10 + offset 
+        #    cardIndex = pIndex*10+index
+        #    dict = self.cardDicts[cardIndex]
+            #galleryButton = discord.ui.Button(label=f"Inspect {dict["Title"]}", custom_id=f"{cardIndex}")
+            #galleryButton.callback=self.gallerySelectionCallback
+            
+
+            #self.add_item(galleryButton)
     
     async def returnCallback(self, interaction: discord.Interaction):
-        self.clear_items()
+        #self.clear_items()
         self.assemblePage(self.pageIndex)
         await interaction.response.edit_message(view=self)
+    
+    async def selectCard(self, interaction: discord.Interaction):
+        self.clear_items()
+        embedIndex = int(float(self.selectMenu.values[0]))
+        returnButton = discord.ui.Button(label="Return to Inventory")
+        returnButton.callback = self.returnCallback
+        self.add_item(returnButton)
+        await interaction.response.edit_message(view=self, embed=self.embedList[embedIndex])
 
-    async def gallerySelectionCallback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.clear_items() 
-        returnButton = discord.ui.Button(label=f"Return to Inventory")
-        returnButton.callback = self.returnCallback(self.pageIndex)
-        await interaction.response.edit_message(embed=self.embedList[button.custom_id], view=self)
+    #async def gallerySelectionCallback(self, interaction: discord.Interaction, button: discord.ui.Button):
+    #    #self.clear_items() 
+    #    returnButton = discord.ui.Button(label=f"Return to Inventory")
+    #    returnButton.callback = self.returnCallback(self.pageIndex)
+    #    await interaction.response.edit_message(embed=self.embedList[button.custom_id], view=self)
     
     # <varName> : <dataType> specification of the passed data type
     async def nextPageCallback(self, interaction: discord.Interaction, button: discord.ui.Button, forward):
-        self.clear_items() 
-        if forward == True:
+        #self.clear_items() 
+        if forward:
             self.pageIndex = (self.pageIndex + 1) % self.maxPageSize
         else:
             self.pageIndex = abs(self.pageIndex - 1) % self.maxPageSize
-        self.assemblePage(self,self.pageIndex)
-        interaction.response.edit_message(content=f"Page: {self.pageIndex}",view=self)
-        return
+        self.assemblePage(self.pageIndex)
+        await interaction.response.edit_message(content=f"Page: {self.pageIndex}",view=self)
 
-def dictToDisplay(ctx,type,dbDict): #only supports cards and users 
+async def loadViewParams(ctx,invDict):
+    embedList = []
+    optionList = []
+    tempOptions = [] 
+    index = 0
+    for cardID in invDict["CardIDs"]: #assembling list of embeds 
+        cardFound = await search(ctx,dbType.CARD_JSON,cardID)
+        tempCardDict = json.loads(cardFound.content)
+        cardEmbed = discord.Embed(title=tempCardDict["Title"], description=f"\nCard ID: {tempCardDict["CardID"]}\nCreated by: {tempCardDict["Creator"]}\nRarity: {tempCardDict["Rarity"]}")
+        cardEmbed.set_image(url=tempCardDict["Content"])
+        
+        embedList.append(cardEmbed)
+        option = discord.SelectOption(label=f"{tempCardDict["Title"]}", value=f"{index}", description=f"Rarity: {tempCardDict["Rarity"]} CardID: {tempCardDict["CardID"]}")
+        tempOptions.append(option)
+        if (index+1) % 25 == 0 or index == len(invDict["CardIDs"])-1: 
+            print("Accessed page finalizer")
+            optionList.append(list(tempOptions))
+            tempOptions.clear()
+        index += 1 
+    print(f"Checking loadViewParams correctness: optionList size: {len(optionList)}\n")
+    for mOption in optionList: 
+        for option in mOption: 
+            print(f"OPTION: label: {option.label} value: {option.value}")
+        
+    return embedList,optionList
+
+
+async def dictToDisplay(ctx,type,dbDict): #only supports cards and users 
     if type.value == 1: #CARD 
         embed = discord.Embed(title=dbDict["Title"], description=f"\nCard ID: {dbDict["CardID"]}\nCreated by: {dbDict["Creator"]}\nRarity: {dbDict["Rarity"]}")
         embed.set_image(url=dbDict["Content"])
     if type.value == 2: #USER
         embed = discord.Embed(title=dbDict["Username"], description=f"\nInventory ID: {dbDict["InventoryID"]}\nBalance: {dbDict["Balance"]}")
-    if type.value == 3: #INVENTORY 
-        invView = inventoryView(ctx,dbDict)
+    if type.value == 3: #INVENTORY
+        #embedList, pageList, cardDicts = [], [], []
+        embedList, optionList = [], []
+        embedList, optionList = await loadViewParams(ctx, dbDict)
+        print(f"dictToDisplay: ACCESSED INVENTORY {dbDict["InventoryID"]}")
+        invView = inventoryView(embedList, optionList)
         return invView
         #await ctx.send(invView)
         #embed = discord.Embed(title=dbDict["Username"], description=f"\nInventory ID: {dbDict["InventoryID"]}\nBalance: {dbDict["Balance"]}")
     return embed
 
-async def sendEmbedFromJson(ctx,type, jsonData): #TODO: renderEmbed needs to account for inventories and users 
+async def sendEmbedFromJson(ctx,type, jsonData: str): #TODO: renderEmbed needs to account for inventories and users 
     dbDict = json.loads(jsonData) #converts json string object to dict 
     if type.value == 1:
-        dbEmbed = dictToDisplay(ctx,dbType.CARD_JSON,dbDict)
+        dbEmbed = await dictToDisplay(ctx,dbType.CARD_JSON,dbDict)
     elif type.value == 2:  
-        dbEmbed = dictToDisplay(ctx,dbType.USER_JSON,dbDict)
+        dbEmbed = await dictToDisplay(ctx,dbType.USER_JSON,dbDict)
     elif type.value == 3:
-        dbView = dictToDisplay(ctx,dbType.INVENTORY_JSON, dbDict)
+        dbView = await dictToDisplay(ctx,dbType.INVENTORY_JSON, dbDict)
         await ctx.send(view=dbView)
         return dbView 
         #inventory json-data to compose gallery 
