@@ -216,6 +216,46 @@ async def createcard(ctx, title, img):
     cardJson = await storeJSON(ctx, cardDict, cardDict["CardID"], dbType.CARD_JSON)
     await sendEmbedFromJson(ctx,dbType.CARD_JSON,cardJson)
     return cardDict["CardID"]
+
+async def updateInv(ctx,invID,dictChanges):
+    invFound = await silentSearch(ctx, type, invID)
+    if invFound is None: 
+        print("updateEntry: Target item not found")
+        return 
+    entryDict = json.loads(invFound.content)
+    for field, change in dictChanges.items():
+        if field == "CardCount":
+            entryDict[field]+=change
+        elif field == "CardIDs":
+            #format for changing CardIDs, 
+            # <field> : [-1/1, <CardID>]
+            # -1 = remove card, 1 = add card
+            if change[0] == -1: 
+                entryDict[field].remove(change[1]) 
+            else: 
+                entryDict[field].append(change[1])
+        await ctx.send(f"Successfully updated {dbTypeDict[type]} channel. Field: {field}, Change: {change}")
+    await invFound.edit(content=json.dumps(entryDict))    
+
+@bot.command()
+@commands.is_owner() 
+async def freecard(ctx,cardID):
+    cardFound = await silentSearch(ctx,dbType.CARD_JSON,cardID)
+    cardFound = json.loads(cardFound.content)
+    ownerFound = await silentSearch(ctx,dbType.USER_JSON,cardFound["Owner"])
+    ownerFound = json.loads(ownerFound.content)
+    inventoryFound = await silentSearch(ctx,dbType.INVENTORY_JSON,ownerFound["InventoryID"])
+    inventoryFound = json.loads(inventoryFound.content)
+    dChanges = {
+        ""
+
+    }
+
+    dChanges = {
+        "Availability":True,
+        "Owner":None
+    }
+    await updateEntry(ctx,cardID,dbType.CARD_JSON,dChanges)
     #await storecard(ctx)
 
 #Idea for creating IDs for each message 
@@ -405,9 +445,21 @@ async def updateEntry(ctx,ID,type,dictChanges):
         print("updateEntry: Target item not found")
         return 
     entryDict = json.loads(jsonEntry.content)
-    for field, change in dictChanges.items(): 
-        entryDict[field]=change
-        await ctx.send(f"Successfully updated {field} with {change}")
+    for field, change in dictChanges.items():
+        if type == dbType.INVENTORY_JSON:
+            if field == "CardCount":
+                entryDict[field]+=change
+            elif field == "CardIDs":
+                #format for changing CardIDs, 
+                # <field> : [-1/1, <CardID>]
+                # -1 = remove card, 1 = add card
+                if change[0] == -1: 
+                    entryDict[field].remove(change[1]) 
+                else: 
+                    entryDict[field].append(change[1])             
+        else: 
+            entryDict[field]=change
+        await ctx.send(f"Successfully updated {dbTypeDict[type]} channel. Field: {field}, Change: {change}")
     await jsonEntry.edit(content=json.dumps(entryDict))
         
 #TODO: Update givecard to prevent duplicate cards from being given 
