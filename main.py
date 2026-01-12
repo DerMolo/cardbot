@@ -28,7 +28,7 @@ def calcRarity(rarity):
         if rarity<=percent:
             return rarityClass[percent]
 
-dbChannels = ["card-json", "user-json", "inventory-json"]
+dbChannels = ["card-json", "user-json", "inventory-json","card-inbox"]
 
 
 #NOTE: dbType is most likely useless. It's currently used to map
@@ -203,6 +203,7 @@ async def createcard(ctx, title, img):
     print(f"generated rarity: {rarity}")
     #card = Card(title, ctx.author.name, img, rarity)
     cardDict = {"Title":title,
+                "Availability":True,
                 "Creator":ctx.author.name,
                 "Owner":None,
                 "Content":img, #URL to image
@@ -298,6 +299,13 @@ async def silentSearch(ctx, type, ID):
 # NOTE: 
 # I might need to re-introduce pre-rendered galleries for inventories 
 
+@bot.command() 
+async def inventory(ctx, username):
+    userFound = await silentSearch(ctx,dbType.USER_JSON,username)
+    userDict = json.loads(userFound.content)
+    await search(ctx,dbType.INVENTORY_JSON,userDict["InventoryID"])
+
+
 @bot.command()
 @commands.is_owner() 
 async def givecard(ctx, username, cardID):
@@ -307,7 +315,7 @@ async def givecard(ctx, username, cardID):
         await ctx.send("Card doesn't exist")  
         return
     if userFound is None:
-        await ctx.send("Initializing user entry with provided card")
+        await ctx.send("Initializing user entry")
         await createUser(ctx,username,cardFound.content)
         return
     else: 
@@ -315,54 +323,20 @@ async def givecard(ctx, username, cardID):
         cardFound = json.loads(cardFound.content)
         inventoryFound = await silentSearch(ctx,dbType.INVENTORY_JSON,userFound["InventoryID"])
         invJson = json.loads(inventoryFound.content)
-        invJson["CardIDs"].append(cardFound["CardID"])
-        invJson["CardCount"] += 1 
+        if not cardFound["Availability"]:
+            invJson["CardIDs"].append(cardFound["CardID"])
+            invJson["CardCount"] += 1 
+        else: 
+            await ctx.send(f"Card is already owned by {cardFound["Owner"]}")
         await inventoryFound.edit(content=json.dumps(invJson))
     dChanges = {
-        "Owner" : username
+        "Owner" : username,
+        "Availability" : False
     }
     await updateEntry(ctx,cardID,dbType.CARD_JSON,dChanges)
 
-#UPDATE FUNCTIONS 
-#async def updateUserBalance(ctx,userID,balance):
-#    userJson = await search(ctx, dbType.USER_JSON, userID)
-#    if userJson is None:
-#        print("updateUserBalance: No user found") 
-#        return 
-#    userDict = json.loads(userJson.content)
-#    userDict["Balance"] = balance
-#    await userJson.edit(content=json.dumps(userDict))
-
-#async def updateCard(ctx,cardID,username):
-#    cardJson = await search(ctx, dbType.CARD_JSON, cardID)
-#    if cardJson is None:
-#        print("updateCard: No card found") 
-#        return 
-#    userDict = json.loads(cardJson.content)
-#    userDict["Owner"] = username
- #   await cardJson.edit(content=json.dumps(userDict))
-
-#Generalizing entry changes 
-#NOTE: Only applicable to USERS and CARDS
-async def updateEntry(ctx,ID,type,dictChanges):
-    jsonEntry = await search(ctx, type, ID)
-    if jsonEntry is None: 
-        print("updateEntry: Target item not found")
-        return 
-    entryDict = json.loads(jsonEntry.content)
-    for field, change in dictChanges.items(): 
-        entryDict[field]=change
-        await ctx.send(f"Successfully updated {field} with {change}")
-    await jsonEntry.edit(content=json.dumps(entryDict))
-        
-#TODO: Update givecard to prevent duplicate cards from being given 
-
-async def updateInventory(ctx,invID,cardID):
-    
-    return 
-
 #ENTRY CREATION 
-async def createUser(ctx, username, cardJson):
+async def createUser(ctx, username: str, cardJson: str):
     card = json.loads(cardJson)
     userDict = {
         "Username":username,
@@ -387,6 +361,16 @@ async def createInventory(ctx, username, userID, cardDict):
         "InventoryID":await createID(ctx,dbType.INVENTORY_JSON),
         "CardIDs":[cardDict["CardID"]], 
     }
+    if not cardDict["Availability"]: 
+        invDict["CardCount"] = 0
+        invDict["CardIDs"] = []
+    else: 
+        dChanges = {
+        "Owner" : username,
+        "Availability" : False
+        }
+        await updateEntry(ctx,cardDict["CardID"],dbType.CARD_JSON,dChanges)
+
     await ctx.send(f"Inventory-json message id for {invDict["Username"]}: {invDict["InventoryID"]}")
     print(f"inventory-json message id: {invDict["InventoryID"]}")
     invJson = await storeJSON(ctx, invDict, invDict["InventoryID"],dbType.INVENTORY_JSON) #update user-json
@@ -394,6 +378,43 @@ async def createInventory(ctx, username, userID, cardDict):
     await sendEmbedFromJson(ctx, dbType.INVENTORY_JSON, invJson) 
     return invDict["InventoryID"]
 
+#UPDATE FUNCTIONS 
+#async def updateUserBalance(ctx,userID,balance):
+#    userJson = await search(ctx, dbType.USER_JSON, userID)
+#    if userJson is None:
+#        print("updateUserBalance: No user found") 
+#        return 
+#    userDict = json.loads(userJson.content)
+#    userDict["Balance"] = balance
+#    await userJson.edit(content=json.dumps(userDict))
+
+#async def updateCard(ctx,cardID,username):
+#    cardJson = await search(ctx, dbType.CARD_JSON, cardID)
+#    if cardJson is None:
+#        print("updateCard: No card found") 
+#        return 
+#    userDict = json.loads(cardJson.content)
+#    userDict["Owner"] = username
+ #   await cardJson.edit(content=json.dumps(userDict))
+
+#Generalizing entry changes 
+#NOTE: Only applicable to USERS and CARDS
+async def updateEntry(ctx,ID,type,dictChanges):
+    jsonEntry = await silentSearch(ctx, type, ID)
+    if jsonEntry is None: 
+        print("updateEntry: Target item not found")
+        return 
+    entryDict = json.loads(jsonEntry.content)
+    for field, change in dictChanges.items(): 
+        entryDict[field]=change
+        await ctx.send(f"Successfully updated {field} with {change}")
+    await jsonEntry.edit(content=json.dumps(entryDict))
+        
+#TODO: Update givecard to prevent duplicate cards from being given 
+
+async def updateInventory(ctx,invID,cardID):
+    
+    return 
 
 #NOTE: (something to handle later on)
 # persistent view issues
@@ -407,11 +428,12 @@ class inventoryView(discord.ui.View):
         #self.cardDicts = cardDicts 
 
         self.pageIndex = 0
-        self.assemblePage(self.pageIndex)
         self.maxPageSize = math.ceil(len(embedList)/25)
+        self.assemblePage(self.pageIndex)
 
     def assemblePage(self,pIndex):
         self.clear_items() 
+        print(f"assemblePage: maxPageSize: {self.maxPageSize} ,pIndex: {pIndex}")
         if len(self.optionList) > 1: #adding next page button for pagelists greater than one 
             nextButton = discord.ui.Button(label="Next Page", custom_id=f"{pIndex}")
             nextButton.callback = partial(self.nextPageCallback, forward = True)
@@ -472,12 +494,15 @@ class inventoryView(discord.ui.View):
         await interaction.response.edit_message(content=f"Page: {self.pageIndex}",view=self)
 
 async def loadViewParams(ctx,invDict):
+    if len(invDict["CardIDs"]) == 0:
+        await ctx.send("Unable to create inventoryView with empty inventory") 
+        return -1, -1
     embedList = []
     optionList = []
     tempOptions = [] 
     index = 0
     for cardID in invDict["CardIDs"]: #assembling list of embeds 
-        cardFound = await search(ctx,dbType.CARD_JSON,cardID)
+        cardFound = await silentSearch(ctx,dbType.CARD_JSON,cardID)
         tempCardDict = json.loads(cardFound.content)
         cardEmbed = discord.Embed(title=tempCardDict["Title"], description=f"\nCard ID: {tempCardDict["CardID"]}\nCreated by: {tempCardDict["Creator"]}\nRarity: {tempCardDict["Rarity"]}")
         cardEmbed.set_image(url=tempCardDict["Content"])
@@ -508,6 +533,8 @@ async def dictToDisplay(ctx,type,dbDict): #only supports cards and users
         #embedList, pageList, cardDicts = [], [], []
         embedList, optionList = [], []
         embedList, optionList = await loadViewParams(ctx, dbDict)
+        if embedList == -1: 
+            return -1
         print(f"dictToDisplay: ACCESSED INVENTORY {dbDict["InventoryID"]}")
         invView = inventoryView(embedList, optionList)
         return invView
@@ -523,6 +550,8 @@ async def sendEmbedFromJson(ctx,type, jsonData: str): #TODO: renderEmbed needs t
         dbEmbed = await dictToDisplay(ctx,dbType.USER_JSON,dbDict)
     elif type.value == 3:
         dbView = await dictToDisplay(ctx,dbType.INVENTORY_JSON, dbDict)
+        if dbView == -1: 
+            return -1
         await ctx.send(view=dbView)
         return dbView 
         #inventory json-data to compose gallery 
